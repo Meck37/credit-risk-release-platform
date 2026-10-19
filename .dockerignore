@@ -1,0 +1,15 @@
+.git
+.github
+data
+reports
+tests
+training
+release
+scripts
+ops
+docs
+infra
+deploy
+**/__pycache__
+*.pyc
+.venv

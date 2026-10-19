@@ -1,0 +1,9 @@
+# Everything needed to train, test and release (your laptop and the CI runners).
+-r requirements-serving.txt
+mlflow[auth]==3.17.1
+pyarrow==25.0.1
+requests==2.34.2
+httpx==0.28.1
+pytest==9.1.1
+ruff==0.17.1
+pip-audit==2.10.1

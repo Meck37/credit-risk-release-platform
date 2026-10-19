@@ -1,0 +1,16 @@
+# Dependabot opens a pull request whenever a dependency has a new or patched
+# version, so dependency changes always result in a notification and a reviewed change.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule: {interval: weekly}
+  - package-ecosystem: docker
+    directories: ["/", "/deploy/platform/mlflow"]
+    schedule: {interval: weekly}
+  - package-ecosystem: docker-compose
+    directories: ["/deploy/platform", "/deploy/app"]
+    schedule: {interval: weekly}
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: {interval: weekly}

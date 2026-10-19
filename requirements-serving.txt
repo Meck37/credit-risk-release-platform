@@ -1,0 +1,11 @@
+# Runtime dependencies of the scoring API image only (kept minimal = smaller attack surface).
+fastapi==0.143.2
+uvicorn[standard]==0.54.0
+pydantic==2.14.1
+prometheus-client==0.26.0
+prometheus-fastapi-instrumentator==8.1.0
+scikit-learn==1.9.1
+pandas==3.0.6
+numpy==2.5.4
+mlflow-skinny==3.17.1
+skops==0.16.0

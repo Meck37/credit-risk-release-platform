@@ -1,0 +1,18 @@
+# data (real Home Credit data must never be committed)
+data/
+build/
+reports/
+# secrets and rendered configs that contain secrets / personal IDs
+deploy/platform/secrets/
+deploy/platform/alertmanager/alertmanager.yml
+deploy/platform/.env
+infra/terraform/.terraform/
+infra/terraform/*.tfstate*
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+infra/terraform/terraform.tfvars
+*.egg-info/
