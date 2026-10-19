@@ -1,6 +1,6 @@
 # Scoring API image. The approved model is copied in at build time, so the image is
 # the complete, immutable deployment artefact: code + model + dependencies.
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 ARG GIT_SHA=unknown
 ARG MODEL_VERSION=unknown
