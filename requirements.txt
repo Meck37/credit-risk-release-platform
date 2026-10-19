@@ -1,7 +1,7 @@
 # Everything needed to train, test and release (your laptop and the CI runners).
 -r requirements-serving.txt
 mlflow[auth]==3.17.1
-pyarrow==25.0.1
+pyarrow==26.0.0
 requests==2.34.2
 httpx==0.28.1
 pytest==9.1.1
