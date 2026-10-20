@@ -1,0 +1,36 @@
+# Rendered into alertmanager.yml by scripts/init_secrets.sh (the rendered file is
+# git-ignored because it contains your Telegram chat IDs).
+# The bot token is never in this file: it is read from a Docker secret.
+
+route:
+  receiver: platform-oncall
+  group_by: [alertname, env, slot]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers: ['team="model-owner"']
+      receiver: model-owner
+
+# While a whole service is down, do not also page for its latency or error rate.
+inhibit_rules:
+  - source_matchers: ['alertname="ScoringTargetDown"']
+    target_matchers: ['team="platform"']
+    equal: [env, slot]
+
+receivers:
+  - name: platform-oncall
+    telegram_configs:
+      - bot_token_file: /run/secrets/telegram_bot_token
+        chat_id: __PLATFORM_CHAT_ID__
+        parse_mode: HTML
+        send_resolved: true
+        message: '{{ template "telegram.default.message" . }}'
+
+  - name: model-owner
+    telegram_configs:
+      - bot_token_file: /run/secrets/telegram_bot_token
+        chat_id: __MODEL_OWNER_CHAT_ID__
+        parse_mode: HTML
+        send_resolved: true
+        message: '{{ template "telegram.default.message" . }}'

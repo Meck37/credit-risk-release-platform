@@ -1,0 +1,136 @@
+# Shared ML platform: model registry + monitoring.
+# Start:  docker compose -f deploy/platform/docker-compose.yml --env-file deploy/platform/.env up -d
+#
+# Design notes
+# - Every port is bound to 127.0.0.1 only: nothing is reachable from your Wi-Fi network.
+# - Passwords live in ./secrets/*.txt (git-ignored) and are mounted as Docker secrets,
+#   so they never appear in this file, in `docker inspect`, or in environment variables.
+# - Every service has a memory limit so the whole platform fits on an 8 GB laptop.
+
+name: mlops-platform
+
+services:
+  mlflow-db:
+    image: postgres:18.6-alpine
+    environment:
+      POSTGRES_USER: mlflow
+      POSTGRES_DB: mlflow
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
+    volumes:
+      - mlflow-db:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mlflow -d mlflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits: {cpus: "0.50", memory: 256M}
+    restart: unless-stopped
+    networks: [mlops]
+
+  mlflow:
+    build: ./mlflow
+    image: mlops/mlflow-server:3.17.1
+    depends_on:
+      mlflow-db: {condition: service_healthy}
+    secrets: [db_password, mlflow_admin_password, mlflow_flask_secret]
+    volumes:
+      - mlflow-artifacts:/mlflow/artifacts
+      - mlflow-auth:/mlflow/auth
+    ports: ["127.0.0.1:5000:5000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    deploy:
+      resources:
+        limits: {cpus: "1.0", memory: 768M}
+    restart: unless-stopped
+    networks: [mlops]
+
+  prometheus:
+    image: prom/prometheus:v3.13.4
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - ${OPS_HOME}/prometheus-targets:/etc/prometheus/targets:ro
+      - prometheus-data:/prometheus
+    ports: ["127.0.0.1:9090:9090"]
+    deploy:
+      resources:
+        limits: {cpus: "0.50", memory: 512M}
+    restart: unless-stopped
+    networks: [mlops]
+
+  blackbox:
+    image: prom/blackbox-exporter:v0.29.0
+    command: ["--config.file=/etc/blackbox/blackbox.yml"]
+    volumes:
+      - ./blackbox/blackbox.yml:/etc/blackbox/blackbox.yml:ro
+    deploy:
+      resources:
+        limits: {cpus: "0.20", memory: 64M}
+    restart: unless-stopped
+    networks: [mlops]
+
+  alertmanager:
+    image: prom/alertmanager:v0.34.1
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml", "--storage.path=/alertmanager"]
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    secrets: [telegram_bot_token]
+    ports: ["127.0.0.1:9093:9093"]
+    deploy:
+      resources:
+        limits: {cpus: "0.20", memory: 128M}
+    restart: unless-stopped
+    networks: [mlops]
+
+  grafana:
+    image: grafana/grafana:13.2.4
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    secrets: [grafana_admin_password]
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports: ["127.0.0.1:3000:3000"]
+    deploy:
+      resources:
+        limits: {cpus: "0.50", memory: 256M}
+    restart: unless-stopped
+    networks: [mlops]
+
+secrets:
+  db_password:            {file: ./secrets/db_password.txt}
+  mlflow_admin_password:  {file: ./secrets/mlflow_admin_password.txt}
+  mlflow_flask_secret:    {file: ./secrets/mlflow_flask_secret.txt}
+  grafana_admin_password: {file: ./secrets/grafana_admin_password.txt}
+  telegram_bot_token:     {file: ./secrets/telegram_bot_token.txt}
+
+volumes:
+  mlflow-db:
+  mlflow-artifacts:
+  mlflow-auth:
+  prometheus-data:
+  alertmanager-data:
+  grafana-data:
+
+networks:
+  mlops:
+    name: mlops-net
