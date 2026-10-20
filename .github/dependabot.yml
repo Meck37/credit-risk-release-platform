@@ -8,6 +8,11 @@ updates:
   - package-ecosystem: docker
     directories: ["/", "/deploy/platform/mlflow"]
     schedule: {interval: weekly}
+    # Python minor/major upgrades are a planned change (laptop + CI + images together).
+    # Python 3.12 security support ends Oct 2028 - plan the upgrade before then.
+    ignore:
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
   - package-ecosystem: docker-compose
     directories: ["/deploy/platform", "/deploy/app"]
     schedule: {interval: weekly}
