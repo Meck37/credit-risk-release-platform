@@ -1,0 +1,64 @@
+# One compose file for every environment (dev, staging, prod) = environment parity.
+# The differences live only in deploy/envs/<env>.env (port, CPU and memory quota).
+# Started by scripts/deploy.sh and scripts/canary.sh - not by hand.
+
+name: scoring-${APP_ENV}
+
+x-api: &api
+  read_only: true                      # container filesystem is immutable at runtime
+  tmpfs: [/tmp]
+  security_opt: ["no-new-privileges:true"]
+  deploy:
+    resources:
+      limits: {cpus: "${API_CPUS}", memory: "${API_MEMORY}"}
+  logging:                             # keep logs, but cap disk use (5 x 10 MB per container)
+    driver: json-file
+    options: {max-size: "10m", max-file: "5"}
+  restart: unless-stopped
+  networks: [mlops]
+
+services:
+  stable:
+    <<: *api
+    image: ${STABLE_IMAGE}
+    container_name: scoring-${APP_ENV}-stable
+    environment:
+      APP_ENV: ${APP_ENV}
+      DEPLOYMENT_SLOT: stable
+    labels:
+      com.scoring.app: "true"
+      com.scoring.env: ${APP_ENV}
+      com.scoring.slot: stable
+
+  canary:
+    <<: *api
+    profiles: [canary]                 # only started during a production canary
+    image: ${CANARY_IMAGE:-unused}
+    container_name: scoring-${APP_ENV}-canary
+    environment:
+      APP_ENV: ${APP_ENV}
+      DEPLOYMENT_SLOT: canary
+    labels:
+      com.scoring.app: "true"
+      com.scoring.env: ${APP_ENV}
+      com.scoring.slot: canary
+
+  gateway:
+    image: nginx:1.30.6-alpine
+    container_name: scoring-${APP_ENV}-gateway
+    ports: ["127.0.0.1:${GATEWAY_PORT}:8080"]
+    volumes:
+      - ${OPS_HOME}/nginx/${APP_ENV}:/etc/nginx/conf.d:ro
+    deploy:
+      resources:
+        limits: {cpus: "0.20", memory: 64M}
+    labels:
+      com.scoring.gateway: "true"
+      com.scoring.env: ${APP_ENV}
+    restart: unless-stopped
+    networks: [mlops]
+
+networks:
+  mlops:
+    name: mlops-net
+    external: true
