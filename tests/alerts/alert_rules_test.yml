@@ -1,0 +1,158 @@
+# Unit tests for the alert rules, run with:
+#   promtool test rules tests/alerts/alert_rules_test.yml
+# Each test feeds fake metric series into Prometheus and checks which alerts fire.
+rule_files:
+  - ../../deploy/platform/prometheus/alert_rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: canary throwing 5xx errors pages the platform team
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="scoring-api",handler="/v1/score",status="2xx",env="prod",slot="canary"}'
+        values: '0+90x20'
+      - series: 'http_requests_total{job="scoring-api",handler="/v1/score",status="5xx",env="prod",slot="canary"}'
+        values: '0+10x20'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: HighErrorRate
+        exp_alerts:
+          - exp_labels: {severity: critical, team: platform, env: prod, slot: canary}
+            exp_annotations:
+              summary: "More than 2% of scoring calls fail in prod/canary"
+              runbook: docs/runbooks/rollback.md
+
+  - name: healthy service raises no error-rate alert
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="scoring-api",handler="/v1/score",status="2xx",env="prod",slot="stable"}'
+        values: '0+100x20'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: HighErrorRate
+        exp_alerts: []
+
+  - name: prediction drift goes to the model owner, not the platform team
+    interval: 1m
+    input_series:
+      # baseline mean PD at training time was 0.10 ...
+      - series: 'scoring_baseline_mean_score{job="scoring-api",env="prod",slot="stable"}'
+        values: '0.10x60'
+      # ... but live predictions now average 0.20 (60 requests/min)
+      - series: 'scoring_prediction_score_sum{job="scoring-api",env="prod",slot="stable"}'
+        values: '0+12x60'
+      - series: 'scoring_prediction_score_count{job="scoring-api",env="prod",slot="stable"}'
+        values: '0+60x60'
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: PredictionDistributionShift
+        exp_alerts:
+          - exp_labels: {severity: warning, team: model-owner, env: prod}
+            exp_annotations:
+              summary: "Mean predicted PD in prod is >30% away from the training baseline"
+              description: "Possible data drift or upstream change. Model owner to investigate; platform is healthy."
+
+  - name: down container fires after one minute
+    interval: 1m
+    input_series:
+      - series: 'up{job="scoring-api",env="staging",slot="stable"}'
+        values: '1 1 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ScoringTargetDown
+        exp_alerts:
+          - exp_labels: {severity: critical, team: platform, job: scoring-api, env: staging, slot: stable}
+            exp_annotations:
+              summary: "Scoring container staging/stable is not answering scrapes"
+              runbook: docs/runbooks/incident-response.md
+
+  - name: failing health probe through the gateway pages the platform team
+    interval: 1m
+    input_series:
+      - series: 'probe_success{job="availability",instance="http://scoring-prod-gateway:8080/health/ready",env="prod",component="gateway"}'
+        values: '1 1 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: EndpointUnavailable
+        exp_alerts:
+          - exp_labels: {severity: critical, team: platform, job: availability, env: prod, component: gateway,
+                         instance: "http://scoring-prod-gateway:8080/health/ready"}
+            exp_annotations:
+              summary: "http://scoring-prod-gateway:8080/health/ready failed its health probe for 2 minutes"
+              runbook: docs/runbooks/incident-response.md
+
+  - name: slow scoring raises a latency warning
+    interval: 1m
+    input_series:
+      # every request lands in the 0.5 s bucket -> p95 well above 250 ms
+      - series: 'http_request_duration_seconds_bucket{job="scoring-api",handler="/v1/score",env="prod",slot="stable",le="0.25"}'
+        values: '0x20'
+      - series: 'http_request_duration_seconds_bucket{job="scoring-api",handler="/v1/score",env="prod",slot="stable",le="0.5"}'
+        values: '0+60x20'
+      - series: 'http_request_duration_seconds_bucket{job="scoring-api",handler="/v1/score",env="prod",slot="stable",le="+Inf"}'
+        values: '0+60x20'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: HighLatencyP95
+        exp_alerts:
+          - exp_labels: {severity: warning, team: platform, env: prod, slot: stable}
+            exp_annotations:
+              summary: "p95 scoring latency above 250 ms in prod/stable"
+
+  - name: model exceptions page the platform team immediately
+    interval: 1m
+    input_series:
+      - series: 'scoring_prediction_errors_total{job="scoring-api",env="prod",slot="canary"}'
+        values: '0 0 3 5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ModelPredictionFailures
+        exp_alerts:
+          - exp_labels: {severity: critical, team: platform, job: scoring-api, env: prod, slot: canary}
+            exp_annotations:
+              summary: "The model raised errors while scoring in prod/canary"
+              runbook: docs/runbooks/incident-response.md
+
+  - name: memory close to the 512 MiB quota raises a capacity warning
+    interval: 1m
+    input_series:
+      - series: 'process_resident_memory_bytes{job="scoring-api",env="staging",slot="stable"}'
+        values: '450000000x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: MemoryNearQuota
+        exp_alerts:
+          - exp_labels: {severity: warning, team: platform, job: scoring-api, env: staging, slot: stable}
+            exp_annotations:
+              summary: "staging/stable uses >80% of its 512 MiB memory quota"
+
+  - name: CPU close to the 2 core quota raises a consumption warning
+    interval: 1m
+    input_series:
+      # 1.8 CPU-seconds per second = 90% of a 2.0 core quota (0.5 -> 1.0 in Step 10, -> 2.0 in Step 11)
+      - series: 'process_cpu_seconds_total{job="scoring-api",env="prod",slot="stable"}'
+        values: '0+108x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: CpuNearQuota
+        exp_alerts:
+          - exp_labels: {severity: warning, team: platform, job: scoring-api, env: prod, slot: stable}
+            exp_annotations:
+              summary: "prod/stable uses >80% of its 2.0 CPU quota"
+
+  - name: a broken upstream feed (missing external score) goes to the model owner
+    interval: 1m
+    input_series:
+      - series: 'scoring_input_missing_total{job="scoring-api",env="prod",slot="stable",field="EXT_SOURCE_2"}'
+        values: '0+12x60'
+      - series: 'scoring_prediction_score_count{job="scoring-api",env="prod",slot="stable"}'
+        values: '0+60x60'
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: ExternalScoreMissingSpike
+        exp_alerts:
+          - exp_labels: {severity: warning, team: model-owner, env: prod}
+            exp_annotations:
+              summary: "EXT_SOURCE_2 is missing in >5% of prod requests (normally <1%)"
+              description: "An upstream data feed may be broken; predictions are less reliable."

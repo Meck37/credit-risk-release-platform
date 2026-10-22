@@ -43,6 +43,24 @@ jobs:
             | tar xz gitleaks
           ./gitleaks git . --redact --verbose
 
+  monitoring-config:
+    name: alert rules and routing tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Alert rule unit tests (promtool)
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w --entrypoint promtool prom/prometheus:v3.13.4 \
+            test rules tests/alerts/alert_rules_test.yml
+      - name: Alertmanager config and routing
+        run: |
+          sed -e 's/__PLATFORM_CHAT_ID__/111/' -e 's/__MODEL_OWNER_CHAT_ID__/222/' \
+            deploy/platform/alertmanager/alertmanager.yml.tmpl > /tmp/am.yml
+          AM="docker run --rm -v /tmp/am.yml:/am.yml --entrypoint amtool prom/alertmanager:v0.34.1"
+          $AM check-config /am.yml
+          test "$($AM config routes test --config.file=/am.yml team=model-owner)" = "model-owner"
+          test "$($AM config routes test --config.file=/am.yml team=platform)" = "platform-oncall"
+
   image:
     name: build, run and scan the image
     needs: test

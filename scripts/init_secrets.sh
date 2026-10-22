@@ -60,4 +60,17 @@ for f in scoring.json probes.json; do
   t="${OPS_HOME:-$HOME/mlops-ops}/prometheus-targets/$f"
   [[ -f "$t" ]] || echo '[]' > "$t"
 done
+# Grafana (uid 472, gid 0) and Alertmanager (nobody, gid 65534) read these secrets
+# inside their containers. Compose file secrets keep the host owner and mode, so each
+# file gets the container's group and mode 640 (verified with `id`, Step 11).
+for pair in grafana_admin_password:0 telegram_bot_token:65534; do
+  name="${pair%%:*}"; gid="${pair##*:}"
+  f="$DIR/$name.txt"
+  [[ -f "$f" ]] || continue
+  if [[ "$(stat -c %g "$f")" != "$gid" ]]; then
+    sudo chgrp "$gid" "$f"
+  fi
+  chmod 640 "$f"
+done
+
 echo "Secrets ready in $DIR"

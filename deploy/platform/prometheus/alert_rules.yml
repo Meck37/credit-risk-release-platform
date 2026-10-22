@@ -1,0 +1,97 @@
+# Alert ownership follows the job description: the platform team owns service and
+# deployment faults; model-quality alerts are routed to the model owner.
+# Alertmanager routes on the `team` label (see alertmanager.yml).
+
+groups:
+  - name: platform
+    rules:
+      - alert: ScoringTargetDown
+        expr: up{job="scoring-api"} == 0
+        for: 1m
+        labels: {severity: critical, team: platform}
+        annotations:
+          summary: "Scoring container {{ $labels.env }}/{{ $labels.slot }} is not answering scrapes"
+          runbook: docs/runbooks/incident-response.md
+
+      - alert: EndpointUnavailable
+        expr: probe_success{job="availability"} == 0
+        for: 2m
+        labels: {severity: critical, team: platform}
+        annotations:
+          summary: "{{ $labels.instance }} failed its health probe for 2 minutes"
+          runbook: docs/runbooks/incident-response.md
+
+      - alert: HighErrorRate
+        expr: |
+          sum by (env, slot) (rate(http_requests_total{job="scoring-api",handler="/v1/score",status="5xx"}[5m]))
+            /
+          sum by (env, slot) (rate(http_requests_total{job="scoring-api",handler="/v1/score"}[5m]))
+            > 0.02
+        for: 5m
+        labels: {severity: critical, team: platform}
+        annotations:
+          summary: "More than 2% of scoring calls fail in {{ $labels.env }}/{{ $labels.slot }}"
+          runbook: docs/runbooks/rollback.md
+
+      - alert: HighLatencyP95
+        expr: |
+          histogram_quantile(0.95,
+            sum by (env, slot, le) (rate(http_request_duration_seconds_bucket{job="scoring-api",handler="/v1/score"}[5m]))
+          ) > 0.25
+        for: 5m
+        labels: {severity: warning, team: platform}
+        annotations:
+          summary: "p95 scoring latency above 250 ms in {{ $labels.env }}/{{ $labels.slot }}"
+
+      - alert: ModelPredictionFailures
+        expr: increase(scoring_prediction_errors_total[5m]) > 0
+        labels: {severity: critical, team: platform}
+        annotations:
+          summary: "The model raised errors while scoring in {{ $labels.env }}/{{ $labels.slot }}"
+          runbook: docs/runbooks/incident-response.md
+
+  - name: capacity-and-consumption
+    rules:
+      - alert: MemoryNearQuota
+        expr: process_resident_memory_bytes{job="scoring-api"} > 0.8 * 512 * 1024 * 1024
+        for: 10m
+        labels: {severity: warning, team: platform}
+        annotations:
+          summary: "{{ $labels.env }}/{{ $labels.slot }} uses >80% of its 512 MiB memory quota"
+
+      - alert: CpuNearQuota
+        expr: rate(process_cpu_seconds_total{job="scoring-api"}[10m]) > 0.8 * 2.0
+        for: 15m
+        labels: {severity: warning, team: platform}
+        annotations:
+          summary: "{{ $labels.env }}/{{ $labels.slot }} uses >80% of its 2.0 CPU quota"
+
+  - name: model-quality
+    rules:
+      - alert: PredictionDistributionShift
+        expr: |
+          (
+            abs(
+              sum by (env) (rate(scoring_prediction_score_sum[30m]))
+                / sum by (env) (rate(scoring_prediction_score_count[30m]))
+              - avg by (env) (scoring_baseline_mean_score)
+            ) / avg by (env) (scoring_baseline_mean_score) > 0.30
+          )
+          and on (env) sum by (env) (rate(scoring_prediction_score_count[30m])) > 0.05
+        for: 15m
+        labels: {severity: warning, team: model-owner}
+        annotations:
+          summary: "Mean predicted PD in {{ $labels.env }} is >30% away from the training baseline"
+          description: "Possible data drift or upstream change. Model owner to investigate; platform is healthy."
+
+      - alert: ExternalScoreMissingSpike
+        expr: |
+          (
+            sum by (env) (rate(scoring_input_missing_total{field="EXT_SOURCE_2"}[30m]))
+              / sum by (env) (rate(scoring_prediction_score_count[30m]))
+          ) > 0.05
+        for: 15m
+        labels: {severity: warning, team: model-owner}
+        annotations:
+          summary: "EXT_SOURCE_2 is missing in >5% of {{ $labels.env }} requests (normally <1%)"
+          description: "An upstream data feed may be broken; predictions are less reliable."

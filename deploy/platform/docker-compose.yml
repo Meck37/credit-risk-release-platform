@@ -112,7 +112,7 @@ services:
     ports: ["127.0.0.1:3000:3000"]
     deploy:
       resources:
-        limits: {cpus: "0.50", memory: 256M}
+        limits: {cpus: "0.50", memory: 512M}   # was 256M: page-cache thrashing (Step 11)
     restart: unless-stopped
     networks: [mlops]
 

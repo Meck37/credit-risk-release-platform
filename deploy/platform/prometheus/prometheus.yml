@@ -1,0 +1,39 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alert_rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  # Every running scoring container (any env, any slot). The deploy scripts write
+  # targets/scoring.json; Prometheus re-reads it automatically, so deploying,
+  # canarying or rolling back never needs a Prometheus restart.
+  - job_name: scoring-api
+    file_sd_configs:
+      - files: ["/etc/prometheus/targets/scoring.json"]
+
+  # Availability as a user sees it: call /health/ready through each gateway (nginx)
+  # and the registry's /health. Blackbox turns each call into probe_success 1/0.
+  - job_name: availability
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    file_sd_configs:
+      - files: ["/etc/prometheus/targets/probes.json"]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
