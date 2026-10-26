@@ -53,7 +53,7 @@ services:
     networks: [mlops]
 
   prometheus:
-    image: prom/prometheus:v3.13.4
+    image: prom/prometheus:v3.15.1
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
