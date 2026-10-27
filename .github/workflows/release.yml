@@ -1,0 +1,147 @@
+# Controlled release of one approved model version: dev -> staging -> production.
+# Runs on YOUR laptop through a self-hosted runner (label: mlops), because that is
+# where the registry and the environments live.
+#
+# Security: this workflow can only be started by hand (workflow_dispatch), which
+# requires write access to the repository. Pull requests from strangers can never
+# run code on your machine.
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_version:
+        description: "Registry version of hc-credit-risk to release"
+        required: true
+      change_id:
+        description: "Change request ID (e.g. CHG-0001)"
+        required: true
+
+permissions:
+  contents: read
+  actions: read          # to read who approved the production deployment
+
+concurrency:
+  group: release         # never two releases at the same time
+  cancel-in-progress: false
+
+env:
+  MLFLOW_TRACKING_URI: http://127.0.0.1:5000
+  MLFLOW_TRACKING_USERNAME: svc-release
+  MLFLOW_TRACKING_PASSWORD: ${{ secrets.MLFLOW_RELEASE_PASSWORD }}
+  MLFLOW_DISABLE_TELEMETRY: "true"
+  MLFLOW_ENABLE_ARTIFACTS_PROGRESS_BAR: "false"
+  HOLDOUT_PATH: ${{ vars.HOLDOUT_PATH }}
+  PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}
+  PYTHON: ${{ github.workspace }}/.venv/bin/python
+  VERSION: ${{ inputs.model_version }}
+
+jobs:
+  gate:
+    name: release gate (candidate vs champion)
+    runs-on: [self-hosted, mlops]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Python environment
+        run: |
+          python3.12 -m venv .venv
+          .venv/bin/pip install -q -r requirements.txt -e .
+      - name: Validate candidate on the frozen hold-out set
+        run: $PYTHON release/validate_model.py --candidate "$VERSION" --holdout "$HOLDOUT_PATH"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: validation-report
+          path: reports/validation_v*.json
+
+  build:
+    name: package approved model into an image
+    needs: gate
+    runs-on: [self-hosted, mlops]
+    outputs:
+      image: ${{ steps.tag.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          python3.12 -m venv .venv
+          .venv/bin/pip install -q -r requirements.txt -e .
+      - id: tag
+        run: echo "image=credit-scoring:v${VERSION}-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - run: $PYTHON release/export_model.py --version "$VERSION" --out build/model
+      - run: |
+          docker build --build-arg GIT_SHA=$GITHUB_SHA --build-arg MODEL_VERSION=$VERSION \
+            -t ${{ steps.tag.outputs.image }} .
+      - name: Vulnerability scan
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.76.0 \
+            image --exit-code 1 --severity CRITICAL --ignore-unfixed ${{ steps.tag.outputs.image }}
+
+  deploy-dev:
+    needs: build
+    runs-on: [self-hosted, mlops]
+    environment: dev
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          python3.12 -m venv .venv
+          .venv/bin/pip install -q -r requirements.txt -e .
+      - run: scripts/deploy.sh dev ${{ needs.build.outputs.image }} "$VERSION"
+
+  deploy-staging:
+    needs: [build, deploy-dev]
+    runs-on: [self-hosted, mlops]
+    environment: staging
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          python3.12 -m venv .venv
+          .venv/bin/pip install -q -r requirements.txt -e .
+      - run: scripts/deploy.sh staging ${{ needs.build.outputs.image }} "$VERSION"
+      # --rps 6 (guide: 8): measured capacity of one API container at API_CPUS=2.0 on this
+      # laptop is ~6 req/s. Limits unchanged: 250 ms p95, 1% errors. A failure stops the
+      # release; it is re-run with the reason recorded, never by loosening the limits.
+      - name: Load test (must stay under 250 ms p95 and 1% errors)
+        run: $PYTHON scripts/traffic.py --url http://127.0.0.1:8082 --duration 60 --rps 6 --max-p95-ms 250 --max-error-rate 0.01
+      - name: Rollback rehearsal (prove we can go back before touching production)
+        run: |
+          if [ -n "$(.venv/bin/python -c "import json,os;p=os.path.expanduser('~/mlops-ops/state/staging.json');print(json.load(open(p)).get('previous_image') or '')")" ]; then
+            scripts/rollback.sh staging --reason "pre-production rollback rehearsal"
+            scripts/deploy.sh staging ${{ needs.build.outputs.image }} "$VERSION"
+          else
+            echo "First release: nothing to roll back to yet"
+          fi
+      - run: $PYTHON release/registry.py set-alias --alias staging --version "$VERSION"
+
+  deploy-prod:
+    needs: [build, deploy-staging]
+    runs-on: [self-hosted, mlops]
+    environment: production      # waits here for a required reviewer to approve
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          python3.12 -m venv .venv
+          .venv/bin/pip install -q -r requirements.txt -e .
+      - name: Who approved this deployment?
+        id: approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          approver=$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" \
+            | $PYTHON -c "import sys,json; a=json.load(sys.stdin); print(a[-1]['user']['login'] if a else 'unknown')")
+          echo "approver=$approver" >> "$GITHUB_OUTPUT"
+          echo "Approved by: $approver"
+      - name: Canary release (or first deploy)
+        run: |
+          if [ -f ~/mlops-ops/state/prod.json ]; then
+            scripts/canary.sh ${{ needs.build.outputs.image }} "$VERSION"
+          else
+            scripts/deploy.sh prod ${{ needs.build.outputs.image }} "$VERSION"
+          fi
+      - name: Record promotion in the registry
+        run: |
+          $PYTHON release/registry.py promote --version "$VERSION" \
+            --approved-by "${{ steps.approval.outputs.approver }}" --change-id "${{ inputs.change_id }}"
+          $PYTHON scripts/record_release.py env=prod action=promote model_version="$VERSION" \
+            image=${{ needs.build.outputs.image }} approved_by="${{ steps.approval.outputs.approver }}" \
+            change_id="${{ inputs.change_id }}" result=success
